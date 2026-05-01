@@ -73,10 +73,12 @@ Date: ${moment().toLocaleString()}
     const tocBottomOffset = viewContentPaddingBottom;
 
     const contents = await this.app.vault.adapter.readBinary(file.path);
+    const bookId = `${file.path}::${file.stat.size}`;
     ReactDOM.render(
       <EpubReader
         contents={contents}
         title={file.basename}
+        bookId={bookId}
         scrolled={this.settings.scrolledView}
         tocOffset={tocOffset}
         tocBottomOffset={tocBottomOffset}
