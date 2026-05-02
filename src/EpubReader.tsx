@@ -4,7 +4,58 @@ import { WorkspaceLeaf } from 'obsidian';
 import { ReactReader, ReactReaderStyle, type IReactReaderStyle } from 'react-reader';
 import type { Contents, Rendition } from 'epubjs';
 import useLocalStorageState from 'use-local-storage-state';
-import { useHighlights, HIGHLIGHT_STYLES, Highlight } from './useHighlights';
+import { useHighlights, Highlight } from './useHighlights';
+
+const HIGHLIGHT_CLASS = 'epub-custom-hl';
+const HIGHLIGHT_BG = 'rgba(255, 235, 59, 0.38)';
+
+function drawHighlightsInContents(contentsObj: Contents, highlights: Highlight[]) {
+  const doc = contentsObj.document;
+  if (!doc || !doc.body) return;
+
+  doc.querySelectorAll('.' + HIGHLIGHT_CLASS).forEach((el) => el.remove());
+
+  const bodyRect = doc.body.getBoundingClientRect();
+
+  for (const h of highlights) {
+    let range: Range | null = null;
+    try {
+      range = (contentsObj as any).range(h.cfiRange);
+    } catch {
+      continue;
+    }
+    if (!range) continue;
+
+    let rects: DOMRectList | DOMRect[] | null = null;
+    try {
+      rects = range.getClientRects();
+    } catch {
+      continue;
+    }
+    if (!rects || rects.length === 0) continue;
+
+    for (let i = 0; i < rects.length; i++) {
+      const r = rects[i];
+      if (!r || r.width < 1 || r.height < 1) continue;
+
+      const div = doc.createElement('div');
+      div.className = HIGHLIGHT_CLASS;
+      div.dataset.highlightId = h.id;
+      Object.assign(div.style, {
+        position: 'absolute',
+        left: `${r.left - bodyRect.left}px`,
+        top: `${r.top - bodyRect.top}px`,
+        width: `${r.width}px`,
+        height: `${r.height}px`,
+        background: HIGHLIGHT_BG,
+        pointerEvents: 'none',
+        zIndex: '1',
+        borderRadius: '2px',
+      } as CSSStyleDeclaration);
+      doc.body.appendChild(div);
+    }
+  }
+}
 
 export const EpubReader = ({ contents, title, bookId, scrolled, tocOffset, tocBottomOffset, leaf }: {
   contents: ArrayBuffer;
@@ -27,6 +78,17 @@ export const EpubReader = ({ contents, title, bookId, scrolled, tocOffset, tocBo
 
   useEffect(() => { highlightsRef.current = highlights; }, [highlights]);
 
+  const redrawAll = useCallback(() => {
+    const rendition = renditionRef.current;
+    if (!rendition) return;
+    const contentsList: Contents[] = (rendition as any).getContents?.() ?? [];
+    contentsList.forEach((c) => drawHighlightsInContents(c, highlightsRef.current));
+  }, []);
+
+  useEffect(() => {
+    redrawAll();
+  }, [highlights, redrawAll]);
+
   const locationChanged = useCallback((epubcifi: string | number) => {
     setLocation(epubcifi);
   }, [setLocation]);
@@ -43,7 +105,13 @@ export const EpubReader = ({ contents, title, bookId, scrolled, tocOffset, tocBo
 
   useEffect(() => {
     updateFontSize(fontSize);
-  }, [fontSize, updateFontSize]);
+    const timers = [
+      window.setTimeout(redrawAll, 80),
+      window.setTimeout(redrawAll, 250),
+      window.setTimeout(redrawAll, 600),
+    ];
+    return () => timers.forEach((t) => window.clearTimeout(t));
+  }, [fontSize, updateFontSize, redrawAll]);
 
   useEffect(() => {
     const handleResize = () => {
@@ -55,64 +123,34 @@ export const EpubReader = ({ contents, title, bookId, scrolled, tocOffset, tocBo
         parseFloat(viewContentStyle.width),
         parseFloat(viewContentStyle.height)
       );
+      window.setTimeout(redrawAll, 100);
     };
 
     leaf.view.app.workspace.on('resize', handleResize);
     return () => leaf.view.app.workspace.off('resize', handleResize);
-  }, [leaf]);
-
-  const applyHighlight = useCallback((rendition: Rendition, h: Highlight) => {
-    try {
-      rendition.annotations.add(
-        'highlight',
-        h.cfiRange,
-        { id: h.id },
-        () => {
-          setPendingSelection(null);
-          setPendingDelete({ id: h.id, cfiRange: h.cfiRange, text: h.text });
-        },
-        'epub-highlight',
-        HIGHLIGHT_STYLES as any,
-      );
-    } catch (err) {
-      console.warn('[epub-highlight] failed to add annotation', err);
-    }
-  }, []);
+  }, [leaf, redrawAll]);
 
   const handleHighlightClick = useCallback(() => {
     const rendition = renditionRef.current;
     if (!rendition || !pendingSelection) return;
-    const h = addHighlight(pendingSelection.cfiRange, pendingSelection.text);
-    applyHighlight(rendition, h);
+    addHighlight(pendingSelection.cfiRange, pendingSelection.text);
 
     const contentsList: Contents[] = (rendition as any).getContents?.() ?? [];
     contentsList.forEach((c) => c.window.getSelection()?.removeAllRanges());
     setPendingSelection(null);
-  }, [pendingSelection, addHighlight, applyHighlight]);
+  }, [pendingSelection, addHighlight]);
 
   const handleDeleteClick = useCallback(() => {
-    const rendition = renditionRef.current;
-    if (!rendition || !pendingDelete) return;
-    try {
-      rendition.annotations.remove(pendingDelete.cfiRange, 'highlight');
-    } catch (err) {
-      console.warn('[epub-highlight] failed to remove annotation', err);
-    }
+    if (!pendingDelete) return;
     removeHighlight(pendingDelete.id);
     setPendingDelete(null);
   }, [pendingDelete, removeHighlight]);
 
   const readerStyles = isDarkMode ? darkReaderTheme : lightReaderTheme;
 
-  const selectionPreview = pendingSelection
-    ? `"${pendingSelection.text.length > 30 ? pendingSelection.text.slice(0, 30) + '…' : pendingSelection.text}"`
-    : '';
-  const deletePreview = pendingDelete
-    ? `"${pendingDelete.text.length > 30 ? pendingDelete.text.slice(0, 30) + '…' : pendingDelete.text}"`
-    : '';
-
-  const highlightBtnEnabled = !!pendingSelection;
-  const deleteBtnVisible = !!pendingDelete;
+  const truncate = (s: string) => s.length > 30 ? s.slice(0, 30) + '…' : s;
+  const selectionPreview = pendingSelection ? `"${truncate(pendingSelection.text)}"` : '';
+  const deletePreview = pendingDelete ? `"${truncate(pendingDelete.text)}"` : '';
 
   return (
     <div style={{ height: "100vh" }}>
@@ -131,30 +169,30 @@ export const EpubReader = ({ contents, title, bookId, scrolled, tocOffset, tocBo
           min="80"
           max="160"
           value={fontSize}
-          onChange={e => setFontSize(parseInt(e.target.value))}
+          onChange={(e) => setFontSize(parseInt(e.target.value))}
         />
 
         <div style={{ flex: 1 }} />
 
         <button
           onClick={handleHighlightClick}
-          disabled={!highlightBtnEnabled}
+          disabled={!pendingSelection}
           style={{
             padding: '6px 12px',
             borderRadius: 4,
             border: 'none',
-            cursor: highlightBtnEnabled ? 'pointer' : 'not-allowed',
-            background: highlightBtnEnabled ? '#ffeb3b' : (isDarkMode ? '#444' : '#eee'),
-            color: highlightBtnEnabled ? '#000' : (isDarkMode ? '#888' : '#999'),
+            cursor: pendingSelection ? 'pointer' : 'not-allowed',
+            background: pendingSelection ? '#ffeb3b' : (isDarkMode ? '#444' : '#eee'),
+            color: pendingSelection ? '#000' : (isDarkMode ? '#888' : '#999'),
             fontSize: 13,
             fontWeight: 500,
           }}
-          title={highlightBtnEnabled ? `点击高亮：${selectionPreview}` : '请先在正文中选中要高亮的文字'}
+          title={pendingSelection ? `点击高亮：${selectionPreview}` : '请先在正文中选中要高亮的文字'}
         >
           🟡 高亮选中文字
         </button>
 
-        {deleteBtnVisible && (
+        {pendingDelete && (
           <button
             onClick={handleDeleteClick}
             style={{
@@ -190,16 +228,44 @@ export const EpubReader = ({ contents, title, bookId, scrolled, tocOffset, tocBo
             renditionRef.current = rendition;
 
             rendition.hooks.content.register((contentsObj: Contents) => {
-              const body = contentsObj.window.document.body;
-              body.oncontextmenu = () => false;
+              const doc = contentsObj.document;
+              doc.body.oncontextmenu = () => false;
+
+              let downX = 0;
+              let downY = 0;
+              let downAt = 0;
+              doc.addEventListener('mousedown', (e) => {
+                downX = e.clientX;
+                downY = e.clientY;
+                downAt = Date.now();
+              });
+              doc.addEventListener('mouseup', (e) => {
+                const moved = Math.abs(e.clientX - downX) > 3 || Math.abs(e.clientY - downY) > 3;
+                const tooLong = Date.now() - downAt > 500;
+                if (moved || tooLong) return;
+
+                const rects = doc.querySelectorAll('.' + HIGHLIGHT_CLASS);
+                for (let i = 0; i < rects.length; i++) {
+                  const el = rects[i] as HTMLElement;
+                  const r = el.getBoundingClientRect();
+                  if (e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom) {
+                    const id = el.dataset.highlightId;
+                    if (!id) continue;
+                    const h = highlightsRef.current.find((x) => x.id === id);
+                    if (!h) continue;
+                    setPendingSelection(null);
+                    setPendingDelete({ id: h.id, cfiRange: h.cfiRange, text: h.text });
+                    return;
+                  }
+                }
+              });
             });
 
             updateTheme(rendition, isDarkMode ? 'dark' : 'light');
             updateFontSize(fontSize);
 
             rendition.on('selected', (cfiRange: string, contentsObj: Contents) => {
-              const selection = contentsObj.window.getSelection();
-              const text = selection?.toString() ?? '';
+              const text = contentsObj.window.getSelection()?.toString() ?? '';
               if (!text.trim()) return;
               setPendingDelete(null);
               setPendingSelection({ cfiRange, text });
@@ -208,10 +274,19 @@ export const EpubReader = ({ contents, title, bookId, scrolled, tocOffset, tocBo
             rendition.on('relocated', () => {
               setPendingSelection(null);
               setPendingDelete(null);
+              window.setTimeout(redrawAll, 30);
+            });
+
+            rendition.on('rendered', () => {
+              window.setTimeout(redrawAll, 30);
+            });
+
+            rendition.on('resized', () => {
+              window.setTimeout(redrawAll, 80);
             });
 
             rendition.once('started', () => {
-              highlightsRef.current.forEach((h) => applyHighlight(rendition, h));
+              window.setTimeout(redrawAll, 100);
             });
           }}
           epubOptions={scrolled ? {
