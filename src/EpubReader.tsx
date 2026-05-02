@@ -6,48 +6,6 @@ import type { Contents, Rendition } from 'epubjs';
 import useLocalStorageState from 'use-local-storage-state';
 import { useHighlights, HIGHLIGHT_STYLES, Highlight } from './useHighlights';
 
-const TOOLBAR_CLASS = 'epub-highlight-toolbar';
-
-function removeIframeToolbar(doc: Document) {
-  doc.querySelectorAll('.' + TOOLBAR_CLASS).forEach((el) => el.remove());
-}
-
-function createToolbarEl(
-  doc: Document,
-  label: string,
-  x: number,
-  y: number,
-  onClick: () => void
-): HTMLElement {
-  const el = doc.createElement('div');
-  el.className = TOOLBAR_CLASS;
-  el.textContent = label;
-  Object.assign(el.style, {
-    position: 'absolute',
-    left: `${x}px`,
-    top: `${y}px`,
-    transform: 'translate(-50%, -100%)',
-    marginTop: '-8px',
-    background: '#333',
-    color: '#fff',
-    padding: '6px 12px',
-    borderRadius: '4px',
-    boxShadow: '0 2px 8px rgba(0, 0, 0, 0.3)',
-    zIndex: '99999',
-    fontSize: '13px',
-    cursor: 'pointer',
-    userSelect: 'none',
-    fontFamily: 'sans-serif',
-    whiteSpace: 'nowrap',
-  } as CSSStyleDeclaration);
-  el.addEventListener('mousedown', (e) => e.preventDefault());
-  el.addEventListener('click', (e) => {
-    e.stopPropagation();
-    onClick();
-  });
-  return el;
-}
-
 export const EpubReader = ({ contents, title, bookId, scrolled, tocOffset, tocBottomOffset, leaf }: {
   contents: ArrayBuffer;
   title: string;
@@ -62,14 +20,12 @@ export const EpubReader = ({ contents, title, bookId, scrolled, tocOffset, tocBo
   const [fontSize, setFontSize] = useState(100);
   const { highlights, addHighlight, removeHighlight } = useHighlights(bookId);
   const highlightsRef = useRef<Highlight[]>(highlights);
-  const addHighlightRef = useRef(addHighlight);
-  const removeHighlightRef = useRef(removeHighlight);
+  const [pendingSelection, setPendingSelection] = useState<{ cfiRange: string; text: string } | null>(null);
+  const [pendingDelete, setPendingDelete] = useState<{ id: string; cfiRange: string; text: string } | null>(null);
 
   const isDarkMode = document.body.classList.contains('theme-dark');
 
   useEffect(() => { highlightsRef.current = highlights; }, [highlights]);
-  useEffect(() => { addHighlightRef.current = addHighlight; }, [addHighlight]);
-  useEffect(() => { removeHighlightRef.current = removeHighlight; }, [removeHighlight]);
 
   const locationChanged = useCallback((epubcifi: string | number) => {
     setLocation(epubcifi);
@@ -105,50 +61,15 @@ export const EpubReader = ({ contents, title, bookId, scrolled, tocOffset, tocBo
     return () => leaf.view.app.workspace.off('resize', handleResize);
   }, [leaf]);
 
-  const findContentsByDocument = useCallback((doc: Document): Contents | null => {
-    const rendition = renditionRef.current;
-    if (!rendition) return null;
-    const list: Contents[] = (rendition as any).getContents?.() ?? [];
-    return list.find((c) => c.document === doc) ?? null;
-  }, []);
-
-  const showDeleteToolbar = useCallback(
-    (contentsObj: Contents, highlightId: string, cfiRange: string, clientX: number, clientY: number) => {
-      const doc = contentsObj.document;
-      removeIframeToolbar(doc);
-      const bodyRect = doc.body.getBoundingClientRect();
-      const x = clientX - bodyRect.left;
-      const y = clientY - bodyRect.top;
-
-      const el = createToolbarEl(doc, '🗑 删除高亮', x, y, () => {
-        const rendition = renditionRef.current;
-        if (!rendition) return;
-        try {
-          rendition.annotations.remove(cfiRange, 'highlight');
-        } catch (err) {
-          console.warn('[epub-highlight] failed to remove annotation', err);
-        }
-        removeHighlightRef.current(highlightId);
-        removeIframeToolbar(doc);
-      });
-      doc.body.appendChild(el);
-    },
-    []
-  );
-
   const applyHighlight = useCallback((rendition: Rendition, h: Highlight) => {
     try {
       rendition.annotations.add(
         'highlight',
         h.cfiRange,
         { id: h.id },
-        (e: MouseEvent) => {
-          const target = e.target as Element | null;
-          const doc = (target?.ownerDocument ?? null) as Document | null;
-          if (!doc) return;
-          const contentsObj = findContentsByDocument(doc);
-          if (!contentsObj) return;
-          showDeleteToolbar(contentsObj, h.id, h.cfiRange, e.clientX, e.clientY);
+        () => {
+          setPendingSelection(null);
+          setPendingDelete({ id: h.id, cfiRange: h.cfiRange, text: h.text });
         },
         'epub-highlight',
         HIGHLIGHT_STYLES as any,
@@ -156,41 +77,54 @@ export const EpubReader = ({ contents, title, bookId, scrolled, tocOffset, tocBo
     } catch (err) {
       console.warn('[epub-highlight] failed to add annotation', err);
     }
-  }, [findContentsByDocument, showDeleteToolbar]);
+  }, []);
 
-  const showHighlightToolbar = useCallback(
-    (contentsObj: Contents, cfiRange: string, text: string) => {
-      const doc = contentsObj.document;
-      removeIframeToolbar(doc);
-      const selection = contentsObj.window.getSelection();
-      if (!selection || selection.rangeCount === 0) return;
-      const range = selection.getRangeAt(0);
-      const rect = range.getBoundingClientRect();
-      if (!rect || (rect.width === 0 && rect.height === 0)) return;
+  const handleHighlightClick = useCallback(() => {
+    const rendition = renditionRef.current;
+    if (!rendition || !pendingSelection) return;
+    const h = addHighlight(pendingSelection.cfiRange, pendingSelection.text);
+    applyHighlight(rendition, h);
 
-      const bodyRect = doc.body.getBoundingClientRect();
-      const x = rect.left + rect.width / 2 - bodyRect.left;
-      const y = rect.top - bodyRect.top;
+    const contentsList: Contents[] = (rendition as any).getContents?.() ?? [];
+    contentsList.forEach((c) => c.window.getSelection()?.removeAllRanges());
+    setPendingSelection(null);
+  }, [pendingSelection, addHighlight, applyHighlight]);
 
-      const el = createToolbarEl(doc, '🟡 高亮', x, y, () => {
-        const rendition = renditionRef.current;
-        if (!rendition) return;
-        const h = addHighlightRef.current(cfiRange, text);
-        applyHighlight(rendition, h);
-        removeIframeToolbar(doc);
-        selection.removeAllRanges();
-      });
-      doc.body.appendChild(el);
-    },
-    [applyHighlight]
-  );
+  const handleDeleteClick = useCallback(() => {
+    const rendition = renditionRef.current;
+    if (!rendition || !pendingDelete) return;
+    try {
+      rendition.annotations.remove(pendingDelete.cfiRange, 'highlight');
+    } catch (err) {
+      console.warn('[epub-highlight] failed to remove annotation', err);
+    }
+    removeHighlight(pendingDelete.id);
+    setPendingDelete(null);
+  }, [pendingDelete, removeHighlight]);
 
   const readerStyles = isDarkMode ? darkReaderTheme : lightReaderTheme;
 
+  const selectionPreview = pendingSelection
+    ? `"${pendingSelection.text.length > 30 ? pendingSelection.text.slice(0, 30) + '…' : pendingSelection.text}"`
+    : '';
+  const deletePreview = pendingDelete
+    ? `"${pendingDelete.text.length > 30 ? pendingDelete.text.slice(0, 30) + '…' : pendingDelete.text}"`
+    : '';
+
+  const highlightBtnEnabled = !!pendingSelection;
+  const deleteBtnVisible = !!pendingDelete;
+
   return (
-    <div style={{ height: "100vh", position: 'relative' }}>
-      <div style={{ padding: '10px' }}>
-        <label htmlFor="fontSizeSlider">Adjust Font Size: </label>
+    <div style={{ height: "100vh" }}>
+      <div style={{
+        padding: '8px 12px',
+        display: 'flex',
+        alignItems: 'center',
+        gap: '16px',
+        flexWrap: 'wrap',
+        borderBottom: isDarkMode ? '1px solid #333' : '1px solid #ddd',
+      }}>
+        <label htmlFor="fontSizeSlider" style={{ fontSize: 13 }}>字号：</label>
         <input
           id="fontSizeSlider"
           type="range"
@@ -199,75 +133,95 @@ export const EpubReader = ({ contents, title, bookId, scrolled, tocOffset, tocBo
           value={fontSize}
           onChange={e => setFontSize(parseInt(e.target.value))}
         />
+
+        <div style={{ flex: 1 }} />
+
+        <button
+          onClick={handleHighlightClick}
+          disabled={!highlightBtnEnabled}
+          style={{
+            padding: '6px 12px',
+            borderRadius: 4,
+            border: 'none',
+            cursor: highlightBtnEnabled ? 'pointer' : 'not-allowed',
+            background: highlightBtnEnabled ? '#ffeb3b' : (isDarkMode ? '#444' : '#eee'),
+            color: highlightBtnEnabled ? '#000' : (isDarkMode ? '#888' : '#999'),
+            fontSize: 13,
+            fontWeight: 500,
+          }}
+          title={highlightBtnEnabled ? `点击高亮：${selectionPreview}` : '请先在正文中选中要高亮的文字'}
+        >
+          🟡 高亮选中文字
+        </button>
+
+        {deleteBtnVisible && (
+          <button
+            onClick={handleDeleteClick}
+            style={{
+              padding: '6px 12px',
+              borderRadius: 4,
+              border: 'none',
+              cursor: 'pointer',
+              background: '#e74c3c',
+              color: '#fff',
+              fontSize: 13,
+              fontWeight: 500,
+            }}
+            title={`删除高亮：${deletePreview}`}
+          >
+            🗑 删除此高亮
+          </button>
+        )}
+
+        <span style={{ fontSize: 12, color: isDarkMode ? '#888' : '#666', maxWidth: 360, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          {pendingDelete ? `已选中高亮 ${deletePreview}` : pendingSelection ? `已选中文字 ${selectionPreview}` : '选中文字即可高亮'}
+        </span>
       </div>
-      <ReactReader
-        title={title}
-        showToc={true}
-        location={location}
-        locationChanged={locationChanged}
-        swipeable={false}
-        url={contents}
-        getRendition={(rendition: Rendition) => {
-          renditionRef.current = rendition;
 
-          rendition.hooks.content.register((contentsObj: Contents) => {
-            const doc = contentsObj.document;
-            doc.body.oncontextmenu = () => false;
-            doc.addEventListener('mousedown', (e) => {
-              const target = e.target as Element | null;
-              if (!target) return;
-              if (target.closest?.('.' + TOOLBAR_CLASS)) return;
-              if (target.closest?.('.epub-highlight')) return;
-              const tag = (target as Element).tagName;
-              if (tag === 'rect' || tag === 'g' || tag === 'svg') return;
-              removeIframeToolbar(doc);
+      <div style={{ height: 'calc(100% - 50px)', position: 'relative' }}>
+        <ReactReader
+          title={title}
+          showToc={true}
+          location={location}
+          locationChanged={locationChanged}
+          swipeable={false}
+          url={contents}
+          getRendition={(rendition: Rendition) => {
+            renditionRef.current = rendition;
+
+            rendition.hooks.content.register((contentsObj: Contents) => {
+              const body = contentsObj.window.document.body;
+              body.oncontextmenu = () => false;
             });
-          });
 
-          updateTheme(rendition, isDarkMode ? 'dark' : 'light');
-          updateFontSize(fontSize);
+            updateTheme(rendition, isDarkMode ? 'dark' : 'light');
+            updateFontSize(fontSize);
 
-          rendition.on('selected', (cfiRange: string, contentsObj: Contents) => {
-            const selection = contentsObj.window.getSelection();
-            const text = selection?.toString() ?? '';
-            if (!text.trim()) return;
-            showHighlightToolbar(contentsObj, cfiRange, text);
-          });
+            rendition.on('selected', (cfiRange: string, contentsObj: Contents) => {
+              const selection = contentsObj.window.getSelection();
+              const text = selection?.toString() ?? '';
+              if (!text.trim()) return;
+              setPendingDelete(null);
+              setPendingSelection({ cfiRange, text });
+            });
 
-          const reapplyAllHighlights = () => {
-            try {
-              const existing = (rendition.annotations as any)._annotations ?? {};
-              Object.keys(existing).forEach((k) => {
-                const ann = existing[k];
-                if (ann?.type === 'highlight') {
-                  rendition.annotations.remove(ann.cfiRange, 'highlight');
-                }
-              });
-            } catch (err) {
-              /* ignore */
-            }
-            highlightsRef.current.forEach((h) => applyHighlight(rendition, h));
-          };
+            rendition.on('relocated', () => {
+              setPendingSelection(null);
+              setPendingDelete(null);
+            });
 
-          rendition.on('relocated', () => {
-            // close any open toolbars when page turns
-            const contentsList: Contents[] = (rendition as any).getContents?.() ?? [];
-            contentsList.forEach((c) => removeIframeToolbar(c.document));
-          });
-
-          rendition.on('resized', reapplyAllHighlights);
-
-          rendition.once('started', () => {
-            highlightsRef.current.forEach((h) => applyHighlight(rendition, h));
-          });
-        }}
-        epubOptions={scrolled ? {
-          allowPopups: true,
-          flow: "scrolled",
-          manager: "continuous",
-        } : undefined}
-        readerStyles={readerStyles}
-      />
+            rendition.once('started', () => {
+              highlightsRef.current.forEach((h) => applyHighlight(rendition, h));
+            });
+          }}
+          epubOptions={scrolled ? {
+            allowPopups: true,
+            flow: "scrolled",
+            manager: "continuous",
+          } : undefined}
+          readerStyles={readerStyles}
+        />
+      </div>
     </div>
   );
 };
