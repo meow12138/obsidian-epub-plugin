@@ -116,10 +116,9 @@ export const EpubReader = ({ contents, title, bookId, scrolled, tocOffset, tocBo
     (contentsObj: Contents, highlightId: string, cfiRange: string, clientX: number, clientY: number) => {
       const doc = contentsObj.document;
       removeIframeToolbar(doc);
-      const scrollLeft = contentsObj.window.scrollX || doc.documentElement.scrollLeft || 0;
-      const scrollTop = contentsObj.window.scrollY || doc.documentElement.scrollTop || 0;
-      const x = clientX + scrollLeft;
-      const y = clientY + scrollTop;
+      const bodyRect = doc.body.getBoundingClientRect();
+      const x = clientX - bodyRect.left;
+      const y = clientY - bodyRect.top;
 
       const el = createToolbarEl(doc, '🗑 删除高亮', x, y, () => {
         const rendition = renditionRef.current;
@@ -169,10 +168,9 @@ export const EpubReader = ({ contents, title, bookId, scrolled, tocOffset, tocBo
       const rect = range.getBoundingClientRect();
       if (!rect || (rect.width === 0 && rect.height === 0)) return;
 
-      const scrollLeft = contentsObj.window.scrollX || doc.documentElement.scrollLeft || 0;
-      const scrollTop = contentsObj.window.scrollY || doc.documentElement.scrollTop || 0;
-      const x = rect.left + rect.width / 2 + scrollLeft;
-      const y = rect.top + scrollTop;
+      const bodyRect = doc.body.getBoundingClientRect();
+      const x = rect.left + rect.width / 2 - bodyRect.left;
+      const y = rect.top - bodyRect.top;
 
       const el = createToolbarEl(doc, '🟡 高亮', x, y, () => {
         const rendition = renditionRef.current;
@@ -235,6 +233,29 @@ export const EpubReader = ({ contents, title, bookId, scrolled, tocOffset, tocBo
             if (!text.trim()) return;
             showHighlightToolbar(contentsObj, cfiRange, text);
           });
+
+          const reapplyAllHighlights = () => {
+            try {
+              const existing = (rendition.annotations as any)._annotations ?? {};
+              Object.keys(existing).forEach((k) => {
+                const ann = existing[k];
+                if (ann?.type === 'highlight') {
+                  rendition.annotations.remove(ann.cfiRange, 'highlight');
+                }
+              });
+            } catch (err) {
+              /* ignore */
+            }
+            highlightsRef.current.forEach((h) => applyHighlight(rendition, h));
+          };
+
+          rendition.on('relocated', () => {
+            // close any open toolbars when page turns
+            const contentsList: Contents[] = (rendition as any).getContents?.() ?? [];
+            contentsList.forEach((c) => removeIframeToolbar(c.document));
+          });
+
+          rendition.on('resized', reapplyAllHighlights);
 
           rendition.once('started', () => {
             highlightsRef.current.forEach((h) => applyHighlight(rendition, h));
